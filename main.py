@@ -40,8 +40,12 @@ PALABRAS_EVENTOS = [
     r"\bconcierto", r"\bferias?\b", r"\bcarpas?\b", r"\bpirotecnia\b",
     r"\bcatering\b", r"\bpasacalles\b", r"\bcabalgata\b", r"\bespect[aá]culo",
     r"\banimaci[oó]n\b", r"\bmegafon[ií]a\b", r"\bpantalla\s+led\b",
+    r"\bhalloween\b", r"\bnochevieja\b", r"\bnavide[ñn]o", r"\bnavidad\b",
+    r"\bcarnaval\b", r"\breyes\b", r"\bmercado\b", r"\bl[uú]dico\b",
+    r"\bcelebraci[oó]n\b", r"\btardeo\b", r"\bcampamento\b",
     r"\b79952000\b", r"\b79953000\b", r"\b79954000\b", r"\b92300000\b"
 ]
+
 
 logging.basicConfig(format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO)
 
