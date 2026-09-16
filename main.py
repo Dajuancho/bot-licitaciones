@@ -8,8 +8,7 @@ from html import unescape
 from http.server import HTTPServer, BaseHTTPRequestHandler
 import feedparser
 from bs4 import BeautifulSoup
-import nest_asyncio
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram import Update
 from telegram.ext import Application, CommandHandler, ContextTypes
 
 # Servidor de mantenimiento para Render (mantiene el bot activo 24/7)
@@ -25,8 +24,6 @@ def keep_alive():
     server.serve_forever()
 
 threading.Thread(target=keep_alive, daemon=True).start()
-
-nest_asyncio.apply()
 
 # --- CONFIGURACIÓN ---
 TOKEN = "8098653016:AAH4NrQqaC9gvGcuvMCJ5toZaqiA-CVp9bY"
@@ -184,7 +181,8 @@ async def revisar_feed(context: ContextTypes.DEFAULT_TYPE):
 
 async def post_init(application: Application):
     job_queue = application.job_queue
-    job_queue.run_repeating(revisar_feed, interval=CHECK_INTERVAL_SECONDS, first=10)
+    if job_queue:
+        job_queue.run_repeating(revisar_feed, interval=CHECK_INTERVAL_SECONDS, first=10)
 
 def main():
     inicializar_bd()
@@ -198,6 +196,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
-if __name__ == "__main__":
-    asyncio.run(main())
