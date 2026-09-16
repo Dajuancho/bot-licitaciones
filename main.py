@@ -12,7 +12,7 @@ import nest_asyncio
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, ContextTypes
 
-# Servidor de mantenimiento para Render
+# Servidor de mantenimiento para Render (mantiene el bot activo 24/7)
 class HealthCheckHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
@@ -34,6 +34,7 @@ FEED_URL = "https://contrataciondelestado.es/syndication/syndication_pge/licitac
 CHECK_INTERVAL_SECONDS = 180
 DB_PATH = "licitaciones_eventos.db"
 
+# 1. Filtro de Tipo de Evento
 PALABRAS_EVENTOS = [
     r"\bevento", r"\beventos", r"\borquesta", r"\bescenario", r"\bsonido",
     r"\biluminaci[oó]n", r"\bluces\b", r"\bfiestas?\b", r"\bfestejos?\b",
@@ -46,183 +47,157 @@ PALABRAS_EVENTOS = [
     r"\b79952000\b", r"\b79953000\b", r"\b79954000\b", r"\b92300000\b"
 ]
 
+# 2. Filtro de Ubicación (Alicante y Murcia)
+UBICACIONES_FILTRO = [
+    r"alicante", r"alacant", r"murcia", r"diputaci[oó]n", r"regi[oó]n de murcia",
+    r"orihuela", r"torrevieja", r"elche", r"\belx\b", r"benidorm", r"alcoy", r"alcoi",
+    r"elda", r"san vicente", r"d[eé]nia", r"denia", r"villena", r"petrer", r"santa pola",
+    r"villajoyosa", r"vila joiosa", r"j[aá]vea", r"x[aà]bia", r"calpe", r"calp",
+    r"crevillent", r"campello", r"altea", r"\bibi\b", r"mutxamel", r"muchamiel",
+    r"novelda", r"aspe", r"sant joan", r"pilar de la horadada", r"almorad[ií]",
+    r"callosa", r"guardamar", r"rojales", r"san fulgencio", r"albatera", r"benij[oó]far",
+    r"redov[aá]n", r"\bcox\b", r"bigastro", r"catral", r"dolores", r"rafal",
+    r"benej[uú]zar", r"los montesinos", r"san isidro", r"algorfa", r"formentera",
+    r"granja de rocamora", r"jacarilla", r"daya nueva", r"daya vieja", r"castalla",
+    r"onil", r"mon[oó]var", r"sax", r"biar", r"pego", r"pedreguer", r"benissa",
+    r"cartagena", r"lorca", r"molina de segura", r"alcantarilla", r"torre-pacheco",
+    r"torre pacheco", r"[aá]guilas", r"cieza", r"yecla", r"san javier", r"totana",
+    r"mazarr[oó]n", r"caravaca", r"jumilla", r"san pedro del pinatar", r"alhama",
+    r"las torres de cotillas", r"la uni[oó]n", r"archena", r"mula", r"los alc[aá]zares",
+    r"ceheg[ií]n", r"fuente [aá]lamo", r"santomera", r"puerto lumbreras", r"abar[aá]n",
+    r"bullas", r"beniel", r"calasparra", r"fortuna", r"alguazas", r"moratalla",
+    r"lorqu[ií]", r"blanca", r"librilla", r"pliego", r"campos del rio", r"oj[oó]s"
+]
 
-logging.basicConfig(format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO)
+logging.basicConfig(format="%(asctime)s - %(levelname)s - %(message)s", level=logging.INFO)
+chats_suscritos = set()
 
-def init_db():
+def inicializar_bd():
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
-    cursor.execute("CREATE TABLE IF NOT EXISTS enviadas (id TEXT PRIMARY KEY, fecha TIMESTAMP DEFAULT CURRENT_TIMESTAMP)")
-    cursor.execute("CREATE TABLE IF NOT EXISTS suscriptores (chat_id INTEGER PRIMARY KEY)")
-    conn.commit()
-    conn.close()
-
-def guardar_licitacion(lic_id):
-    conn = sqlite3.connect(DB_PATH)
-    cursor = conn.cursor()
-    cursor.execute("INSERT OR IGNORE INTO enviadas (id) VALUES (?)", (lic_id,))
-    conn.commit()
-    conn.close()
-
-def es_enviada(lic_id) -> bool:
-    conn = sqlite3.connect(DB_PATH)
-    cursor = conn.cursor()
-    cursor.execute("SELECT 1 FROM enviadas WHERE id = ?", (lic_id,))
-    res = cursor.fetchone()
-    conn.close()
-    return res is not None
-
-def registrar_suscriptor(chat_id):
-    conn = sqlite3.connect(DB_PATH)
-    cursor = conn.cursor()
-    cursor.execute("INSERT OR IGNORE INTO suscriptores (chat_id) VALUES (?)", (chat_id,))
-    conn.commit()
-    conn.close()
-
-def eliminar_suscriptor(chat_id):
-    conn = sqlite3.connect(DB_PATH)
-    cursor = conn.cursor()
-    cursor.execute("DELETE FROM suscriptores WHERE chat_id = ?", (chat_id,))
-    conn.commit()
-    conn.close()
-
-def obtener_suscriptores():
-    conn = sqlite3.connect(DB_PATH)
-    cursor = conn.cursor()
-    cursor.execute("SELECT chat_id FROM suscriptores")
-    rows = cursor.fetchall()
-    conn.close()
-    return [r[0] for r in rows]
-
-def limpiar_texto(html_text):
-    if not html_text:
-        return ""
-    soup = BeautifulSoup(html_text, "html.parser")
-    text = unescape(soup.get_text(separator=" "))
-    return re.sub(r'\s+', ' ', text).strip()
-
-def es_relacionado_con_eventos(texto):
-    for patron in PALABRAS_EVENTOS:
-        if re.search(patron, texto, re.IGNORECASE):
-            return True
-    return False
-
-async def revisar_eventos_job(bot):
-    suscriptores = obtener_suscriptores()
-    if not suscriptores:
-        return
-
-    feed = feedparser.parse(FEED_URL)
-    if not feed.entries:
-        return
-
-    nuevas_eventos = []
-    for entry in reversed(feed.entries):
-        entry_id = entry.get("id") or entry.get("link")
-        if not entry_id or es_enviada(entry_id):
-            continue
-
-        titulo = limpiar_texto(entry.get("title", ""))
-        resumen = limpiar_texto(entry.get("summary", ""))
-        contenido_completo = f"{titulo} {resumen}"
-
-        if es_relacionado_con_eventos(contenido_completo):
-            nuevas_eventos.append({
-                "id": entry_id,
-                "titulo": titulo,
-                "resumen": resumen[:300] + ("..." if len(resumen) > 300 else ""),
-                "link": entry.get("link", "https://contrataciondelestado.es")
-            })
-        else:
-            guardar_licitacion(entry_id)
-
-    for lic in nuevas_eventos:
-        mensaje = (
-            "🎉 <b>NUEVA LICITACIÓN DE EVENTOS</b>\n\n"
-            f"📌 <b>Objeto:</b> {lic['titulo']}\n\n"
-            f"📝 <b>Detalles:</b> {lic['resumen']}\n"
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS licitaciones (
+            id TEXT PRIMARY KEY,
+            titulo TEXT,
+            link TEXT,
+            fecha TEXT
         )
-        keyboard = InlineKeyboardMarkup([
-            [InlineKeyboardButton("🔗 Ver expediente en el Estado", url=lic['link'])]
-        ])
+    """)
+    conn.commit()
+    conn.close()
 
-        for chat_id in suscriptores:
-            try:
-                await bot.send_message(
-                    chat_id=chat_id,
-                    text=mensaje,
-                    parse_mode="HTML",
-                    reply_markup=keyboard,
-                    disable_web_page_preview=True
-                )
-            except Exception:
-                pass
+def guardar_licitacion(lic_id, titulo, link, fecha):
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    try:
+        cursor.execute("INSERT INTO licitaciones VALUES (?, ?, ?, ?)", (lic_id, titulo, link, fecha))
+        conn.commit()
+        guardado = True
+    except sqlite3.IntegrityError:
+        guardado = False
+    conn.close()
+    return guardado
 
-        guardar_licitacion(lic["id"])
-
-async def bucle_segundo_plano(app):
-    await asyncio.sleep(3)
-    while True:
-        try:
-            await revisar_eventos_job(app.bot)
-        except Exception as e:
-            logging.error(f"Error en revisión automática: {e}")
-        await asyncio.sleep(CHECK_INTERVAL_SECONDS)
+def limpiar_html(texto_html):
+    if not texto_html:
+        return ""
+    soup = BeautifulSoup(texto_html, "html.parser")
+    texto = soup.get_text(separator=" ")
+    return unescape(texto).strip()
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
-    registrar_suscriptor(chat_id)
-    texto = (
-        "<b>🎪 Bot de Licitaciones de Eventos Activado</b>\n\n"
-        "Te avisaré automáticamente cada vez que un Ayuntamiento o entidad pública "
-        "publique un contrato sobre <b>fiestas, sonido, escenarios, conciertos o eventos</b>.\n\n"
-        "Comandos:\n"
-        "• /buscar <i>[término]</i> - Buscar manualmente entre las recientes.\n"
-        "• /stop - Pausar alertas automáticas."
+    chats_suscritos.add(chat_id)
+    await update.message.reply_text(
+        "¡Hola! Bot de Licitaciones configurado para **Alicante y Murcia** 🏛️✨\n\n"
+        "Te avisaré automáticamente de licitaciones en estado **PUBLICADA** sobre:\n"
+        "• Eventos, Fiestas, Halloween, Navidad, Orquestas, Luces, Escenarios, etc.\n\n"
+        "Comandos disponibles:\n"
+        "• /buscar [palabra] - Búsqueda manual puntual"
     )
-    await update.message.reply_text(texto, parse_mode="HTML")
 
-async def stop(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    chat_id = update.effective_chat.id
-    eliminar_suscriptor(chat_id)
-    await update.message.reply_text("🔕 Alertas pausadas.")
-
-async def buscar(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = " ".join(context.args).strip()
+async def buscar_manual(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = " ".join(context.args)
     if not query:
-        await update.message.reply_text("⚠️ Ejemplo: <code>/buscar Sevilla</code>", parse_mode="HTML")
+        await update.message.reply_text("Por favor, escribe algo para buscar. Ejemplo: `/buscar orihuela`")
         return
-
+    
+    await update.message.reply_text(f"🔍 Buscando licitaciones recientes sobre: *{query}*...")
     feed = feedparser.parse(FEED_URL)
-    coincidencias = []
-
+    encontradas = 0
+    
     for entry in feed.entries:
-        titulo = limpiar_texto(entry.get("title", ""))
-        resumen = limpiar_texto(entry.get("summary", ""))
-        texto = f"{titulo} {resumen}"
+        titulo = limpiar_html(entry.get("title", ""))
+        summary = limpiar_html(entry.get("summary", ""))
+        link = entry.get("link", "")
+        texto_completo = f"{titulo} {summary}"
+        
+        if query.lower() in texto_completo.lower():
+            encontradas += 1
+            texto_msg = f"🔎 **Resultado encontrado:**\n\n📌 **{titulo}**\n\n🔗 [Ver Licitación]({link})"
+            await update.message.reply_text(texto_msg, parse_mode="Markdown", disable_web_page_preview=True)
+            if encontradas >= 5:
+                break
+                
+    if encontradas == 0:
+        await update.message.reply_text("No se han encontrado licitaciones recientes con ese término.")
 
-        if re.search(re.escape(query), texto, re.IGNORECASE) and es_relacionado_con_eventos(texto):
-            coincidencias.append((titulo, entry.get("link", "#")))
+async def revisar_feed(context: ContextTypes.DEFAULT_TYPE):
+    feed = feedparser.parse(FEED_URL)
+    for entry in feed.entries:
+        lic_id = entry.get("id", entry.get("link"))
+        titulo = limpiar_html(entry.get("title", ""))
+        summary = limpiar_html(entry.get("summary", ""))
+        link = entry.get("link", "")
+        fecha = entry.get("published", "")
+        
+        texto_completo = f"{titulo} {summary}".lower()
+        
+        # 1. Comprobar TIPO DE EVENTO
+        coincide_evento = any(re.search(p, texto_completo, re.IGNORECASE) for p in PALABRAS_EVENTOS)
+        
+        # 2. Comprobar UBICACIÓN (Alicante / Murcia)
+        coincide_ubicacion = any(re.search(u, texto_completo, re.IGNORECASE) for u in UBICACIONES_FILTRO)
+        
+        # 3. Comprobar ESTADO (Solo PUBLICADA o EN PLAZO)
+        es_publicada = "publicada" in texto_completo or "en plazo" in texto_completo
+        
+        # Solo guarda y notifica si se cumplen las TRES condiciones a la vez
+        if coincide_evento and coincide_ubicacion and es_publicada:
+            if guardar_licitacion(lic_id, titulo, link, fecha):
+                mensaje = (
+                    f"🎉 **¡Nueva Licitación Publicada!**\n\n"
+                    f"📌 **{titulo}**\n\n"
+                    f"📍 *Alicante / Murcia*\n"
+                    f"🔗 [Ver detalles en la plataforma]({link})"
+                )
+                for chat_id in chats_suscritos:
+                    try:
+                        await context.bot.send_message(
+                            chat_id=chat_id,
+                            text=mensaje,
+                            parse_mode="Markdown",
+                            disable_web_page_preview=True
+                        )
+                    except Exception as e:
+                        logging.error(f"Error enviando mensaje a {chat_id}: {e}")
 
-    if not coincidencias:
-        await update.message.reply_text(f"❌ Sin contratos de eventos recientes para: <b>{query}</b>", parse_mode="HTML")
-        return
+async def post_init(application: Application):
+    job_queue = application.job_queue
+    job_queue.run_repeating(revisar_feed, interval=CHECK_INTERVAL_SECONDS, first=10)
 
-    respuesta = f"<b>📋 Eventos encontrados para '{query}':</b>\n\n"
-    for tit, lk in coincidencias[:5]:
-        respuesta += f"• <b>{tit[:120]}...</b>\n🔗 <a href='{lk}'>Ver expediente</a>\n\n"
+def main():
+    inicializar_bd()
+    application = Application.builder().token(TOKEN).post_init(post_init).build()
+    
+    application.add_handler(CommandHandler("start", start))
+    application.add_handler(CommandHandler("buscar", buscar_manual))
+    
+    logging.info("Bot iniciado y funcionando correctamente...")
+    application.run_polling()
 
-    await update.message.reply_text(respuesta, parse_mode="HTML", disable_web_page_preview=True)
-
-async def main():
-    init_db()
-    app = Application.builder().token(TOKEN).build()
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("stop", stop))
-    app.add_handler(CommandHandler("buscar", buscar))
-
-    asyncio.create_task(bucle_segundo_plano(app))
-    await app.run_polling()
+if __name__ == "__main__":
+    main()
 
 if __name__ == "__main__":
     asyncio.run(main())
